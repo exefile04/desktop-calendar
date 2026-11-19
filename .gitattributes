@@ -1,0 +1,6 @@
+# Windows batch files must keep CRLF line endings or they can break
+*.bat     text eol=crlf
+# macOS/Linux scripts must keep LF
+*.command text eol=lf
+*.pyw     text eol=lf
+*.md      text eol=lf

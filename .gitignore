@@ -1,0 +1,12 @@
+# personal data (never commit your events)
+desktop_calendar_data.json*
+desktop_calendar_error.log
+
+# Python
+__pycache__/
+*.pyc
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
