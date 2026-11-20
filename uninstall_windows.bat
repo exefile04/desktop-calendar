@@ -12,11 +12,12 @@ reg delete "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" /v DesktopCalend
 del "%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\DesktopCalendar.vbs" >nul 2>nul
 
 rem 3) saved events (asks first)
-choice /M "Also delete your saved events and colors"
+choice /M "Also delete your saved events, colors and notes"
 if errorlevel 2 goto files
 del "%USERPROFILE%\desktop_calendar_data.json*" >nul 2>nul
 del "%USERPROFILE%\desktop_calendar_data.json.tmp" >nul 2>nul
 del "%USERPROFILE%\desktop_calendar_error.log" >nul 2>nul
+del "%USERPROFILE%\desktop_calendar_notes.txt*" >nul 2>nul
 
 :files
 rem 4) remove the calendar's own files from this folder
