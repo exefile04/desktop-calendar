@@ -2,7 +2,8 @@
 Click any date -> add one or more events, each with its own color.
 A day shows the colors of all its events. Hover a day -> see its events.
 Click the month title -> pick a month; click again -> pick a year.
-Drag the title bar to move it. Right-click -> blur, transparency, size, theme, notes, exit.
+Drag the title bar to move it. Right-click -> notes, transparency, size, theme, week start, exit.
+On Windows it lives inside the desktop itself: on every virtual desktop, never over programs.
 Data is saved in your home folder: desktop_calendar_data.json and desktop_calendar_notes.txt
 Errors (if any) go to: desktop_calendar_error.log  (the app keeps running)
 """
@@ -33,13 +34,13 @@ COLORS = {
 }
 THEMES = {
     "dark": dict(bg="#16181c", fg="#e9eaee", dim="#70747d", hover="#262a31", line="#2b2f36",
-                 today="#ffffff", sel="#30353f", tint=0x781C1816,
+                 today="#ffffff", sel="#30353f",
                  wkend="#ff6b6b", wkend_dim="#7d4545"),
     "light": dict(bg="#f4f5f7", fg="#1b1d22", dim="#80848c", hover="#e2e5ea", line="#c9cdd3",
-                  today="#1b1d22", sel="#d3d8e0", tint=0x90F7F5F4,
+                  today="#1b1d22", sel="#d3d8e0",
                   wkend="#d43c3c", wkend_dim="#e6a8a8"),
 }
-DEFAULT_SETTINGS = {"theme": "dark", "alpha": 0.85, "size": 9, "blur": False, "notes": True,
+DEFAULT_SETTINGS = {"theme": "dark", "alpha": 0.85, "size": 9, "notes": True,
                     "week_start": 0}  # 0 = Monday, 6 = Sunday
 DAY_ABBR = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
 MONTHS = [calendar.month_abbr[i] for i in range(1, 13)]
@@ -47,6 +48,15 @@ MONTHS = [calendar.month_abbr[i] for i in range(1, 13)]
 if IS_WIN:
     import ctypes
     from ctypes import wintypes
+
+    # Sharp text at any display scale, and the same pixel units as the desktop it lives in.
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
 
 
 def log_error(text):
@@ -185,6 +195,16 @@ def events_for(d):
 marks, settings = load()
 for _k, _v in DEFAULT_SETTINGS.items():
     settings.setdefault(_k, _v)
+if IS_WIN and not settings.get("dpi_aware"):
+    # older versions saved the position in scaled (100%) pixels
+    try:
+        _f = ctypes.windll.user32.GetDpiForSystem() / 96.0
+        for _k in ("x", "y"):
+            if _k in settings:
+                settings[_k] = int(round(int(settings[_k]) * _f))
+    except Exception:
+        pass
+    settings["dpi_aware"] = True
 today = datetime.date.today()
 # mode: "days" (normal), "months" (pick a month), "years" (pick a year)
 view = {"y": today.year, "m": today.month, "mode": "days", "ystart": today.year - today.year % 12}
@@ -370,18 +390,7 @@ def apply_look():
         pass
     render()
     place_top_right()
-    apply_glass()
-
-
-# ---- glass (Windows blur behind the window) ----
-if IS_WIN:
-    class _ACCENT(ctypes.Structure):
-        _fields_ = [("AccentState", ctypes.c_int), ("AccentFlags", ctypes.c_int),
-                    ("GradientColor", ctypes.c_uint), ("AnimationId", ctypes.c_int)]
-
-    class _WCAD(ctypes.Structure):
-        _fields_ = [("Attribute", ctypes.c_int), ("Data", ctypes.c_void_p),
-                    ("SizeOfData", ctypes.c_size_t)]
+    relayer()
 
 
 _hwnd = {}
@@ -391,142 +400,6 @@ def frame_hwnd():
     if "root" not in _hwnd:
         _hwnd["root"] = int(root.wm_frame(), 16)
     return _hwnd["root"]
-
-
-def glass_on():
-    return IS_WIN and bool(settings.get("blur", True))
-
-
-def apply_glass():
-    """Blur what is behind the window. Windows only blurs the pixels that are
-    'see-through', so the background colour is made transparent (colour key)
-    and an almost invisible 'catcher' window behind it takes the clicks that
-    would otherwise fall through those pixels."""
-    if not IS_WIN:
-        return
-    try:
-        root.update_idletasks()
-        hwnd = frame_hwnd()
-        on = glass_on()
-        root.attributes("-transparentcolor", theme()["bg"] if on else "")
-        acc = _ACCENT(3 if on else 0, 2, theme()["tint"], 0)  # 3 = blur behind, 2 = use tint
-        data = _WCAD(19, ctypes.cast(ctypes.pointer(acc), ctypes.c_void_p), ctypes.sizeof(acc))
-        ctypes.windll.user32.SetWindowCompositionAttribute(wintypes.HWND(hwnd), ctypes.byref(data))
-        pref = ctypes.c_int(2)  # Windows 11: rounded corners
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(wintypes.HWND(hwnd), 33,
-                                                   ctypes.byref(pref), ctypes.sizeof(pref))
-        if on:
-            if catcher is None:
-                make_catcher()
-            catcher.deiconify()
-        elif catcher is not None:
-            catcher.withdraw()
-        sync_catcher()
-    except Exception:
-        log_error(traceback.format_exc())
-
-
-# ---- click catcher (only used with blur on Windows) ----
-catcher = None
-fwd = {"press": None, "hover": None}
-
-
-def make_catcher():
-    global catcher
-    catcher = tk.Toplevel(root)
-    catcher.withdraw()
-    catcher.overrideredirect(True)
-    catcher.config(bg="#000000")
-    catcher.attributes("-alpha", 0.01)
-    catcher.bind("<Motion>", c_hover)
-    catcher.bind("<Leave>", c_leave)
-    catcher.bind("<Button-1>", lambda e: c_press(e, "<Button-1>"))
-    catcher.bind("<Double-Button-1>", lambda e: c_press(e, "<Double-Button-1>"))
-    catcher.bind("<Button-3>", lambda e: c_press(e, "<Button-3>"))
-    catcher.bind("<B1-Motion>", c_drag)
-    catcher.bind("<ButtonRelease-1>", c_release)
-    catcher.bind("<MouseWheel>", c_wheel)
-
-
-def widget_at(xr, yr):
-    """Deepest calendar widget under a screen point (ignores the pop-up windows)."""
-    def walk(w):
-        for ch in reversed(w.winfo_children()):
-            if isinstance(ch, (tk.Toplevel, tk.Menu)) or not ch.winfo_ismapped():
-                continue
-            x, y = ch.winfo_rootx(), ch.winfo_rooty()
-            if x <= xr < x + ch.winfo_width() and y <= yr < y + ch.winfo_height():
-                return walk(ch) or ch
-        return None
-    return walk(root) or root
-
-
-def fwd_event(target, seq, e, **kw):
-    try:
-        target.event_generate(seq, x=e.x_root - target.winfo_rootx(), y=e.y_root - target.winfo_rooty(),
-                              rootx=e.x_root, rooty=e.y_root, **kw)
-    except tk.TclError:
-        pass
-
-
-def c_hover(e):
-    t = widget_at(e.x_root, e.y_root)
-    if t is not fwd["hover"]:
-        if fwd["hover"] is not None:
-            fwd_event(fwd["hover"], "<Leave>", e)
-        fwd["hover"] = t
-        fwd_event(t, "<Enter>", e)
-        try:
-            catcher.config(cursor=t.cget("cursor"))
-        except tk.TclError:
-            catcher.config(cursor="")
-
-
-def c_leave(e):
-    if fwd["hover"] is not None:
-        fwd_event(fwd["hover"], "<Leave>", e)
-        fwd["hover"] = None
-
-
-def c_press(e, seq):
-    t = widget_at(e.x_root, e.y_root)
-    fwd["press"] = t
-    fwd_event(t, seq, e)
-
-
-def c_drag(e):
-    if fwd["press"] is not None:
-        fwd_event(fwd["press"], "<B1-Motion>", e)
-
-
-def c_release(e):
-    if fwd["press"] is not None:
-        fwd_event(fwd["press"], "<ButtonRelease-1>", e)
-        fwd["press"] = None
-
-
-def c_wheel(e):
-    fwd_event(widget_at(e.x_root, e.y_root), "<MouseWheel>", e, delta=e.delta)
-
-
-def sync_catcher():
-    """Keep the catcher exactly under the calendar: same place, size and layer."""
-    if catcher is None or not glass_on():
-        return
-    root.update_idletasks()
-    g = "%dx%d+%d+%d" % (root.winfo_width(), root.winfo_height(), root.winfo_x(), root.winfo_y())
-    if catcher.geometry() != g:
-        catcher.geometry(g)
-    try:
-        u = ctypes.windll.user32
-        ch = wintypes.HWND(int(catcher.wm_frame(), 16))
-        ex = u.GetWindowLongW(ch, -20)
-        if not ex & 0x08000000:  # never take focus or jump in front when clicked
-            u.SetWindowLongW(ch, -20, ex | 0x08000000)
-        # right below the calendar (this also copies its "always on top" state)
-        u.SetWindowPos(ch, wintypes.HWND(frame_hwnd()), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010)
-    except Exception:
-        log_error(traceback.format_exc())
 
 
 # ---- notes ----
@@ -651,7 +524,7 @@ def pointer_inside(w):
 def on_enter(event):
     w = event.widget
     if hov["w"] is w:
-        return  # still the same day (moving between its text and its glass)
+        return
     hov["w"] = w
     if w._plain:
         w.config(bg=theme()["hover"])
@@ -692,6 +565,8 @@ def open_editor(d, x, y):
     win.title(d.strftime("%d %B %Y"))
     win.resizable(False, False)
     win.attributes("-topmost", True)
+    if IS_WIN:
+        win.attributes("-toolwindow", True)  # no taskbar button
     win.protocol("WM_DELETE_WINDOW", close_editor)
 
     tk.Label(win, text=d.strftime("%A, %d %B %Y"), font=(FONT, 10, "bold")).pack(padx=8, pady=(8, 4), anchor="w")
@@ -844,7 +719,11 @@ def go_today():
     render()
 
 
+state = {"quitting": False}
+
+
 def quit_app():
+    state["quitting"] = True
     try:
         save_notes_now()
     except Exception:
@@ -865,7 +744,8 @@ def screen_area():
             gm = ctypes.windll.user32.GetSystemMetrics
             left, top, w, h = gm(76), gm(77), gm(78), gm(79)
             if w > 0 and h > 0:
-                return left, top, left + w, top + h
+                ox, oy = desk_origin()
+                return left - ox, top - oy, left - ox + w, top - oy + h
         except Exception:
             pass
     return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight()
@@ -905,7 +785,6 @@ def drag_start(event):
 def drag_move(event):
     if drag["on"]:
         root.geometry("+%d+%d" % (event.x_root - drag["dx"], event.y_root - drag["dy"]))
-        sync_catcher()
 
 
 def drag_end(event):
@@ -950,7 +829,6 @@ theme_var = tk.StringVar(value=settings["theme"])
 week_var = tk.IntVar(value=int(settings.get("week_start", 0)))
 alpha_var = tk.DoubleVar(value=float(settings["alpha"]))
 size_var = tk.IntVar(value=int(settings["size"]))
-blur_var = tk.BooleanVar(value=bool(settings.get("blur", True)))
 notes_var = tk.BooleanVar(value=bool(settings.get("notes", True)))
 
 
@@ -964,8 +842,6 @@ menu = tk.Menu(root, tearoff=0)
 menu.add_command(label="Go to this month", command=go_today)
 menu.add_checkbutton(label="Show notes", variable=notes_var, command=toggle_notes)
 menu.add_separator()
-menu.add_checkbutton(label="Blur background", variable=blur_var,
-                     command=lambda: set_setting("blur", blur_var.get()))
 m_alpha = tk.Menu(menu, tearoff=0)
 for label, v in [("100% (solid)", 1.0), ("92%", 0.92), ("85%", 0.85), ("75%", 0.75),
                  ("65%", 0.65), ("50%", 0.5)]:
@@ -1117,8 +993,68 @@ if IS_WIN:
             user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, FLAGS)
             z["fg"] = fg
 
+    GA_PARENT = 1
+    user32.FindWindowW.restype = wintypes.HWND
+    user32.GetAncestor.restype = wintypes.HWND
+    user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.SetParent.restype = wintypes.HWND
+    user32.SetParent.argtypes = [wintypes.HWND, wintypes.HWND]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    desk = {"parent": None}
+
+    def no_taskbar(h):
+        ex = user32.GetWindowLongW(h, GWL_EXSTYLE) & 0xFFFFFFFF
+        want = (ex | WS_EX_TOOLWINDOW) & ~0x40000  # tool window, not WS_EX_APPWINDOW
+        if want != ex:
+            user32.SetWindowLongW(h, GWL_EXSTYLE, ctypes.c_long(want - (1 << 32) if want >= 1 << 31 else want).value)
+
+    def embed():
+        """Make the calendar part of the desktop (a child of Progman, above the icons).
+        The desktop is shared by every virtual desktop and always sits under programs."""
+        hwnd = frame_hwnd()
+        prog = user32.FindWindowW("Progman", None)
+        if not prog:
+            return False
+        if desk["parent"] == prog and user32.GetAncestor(hwnd, GA_PARENT) == prog:
+            return True
+        st = user32.GetWindowLongW(hwnd, -16) & 0xFFFFFFFF
+        st = (st & ~0x80000000) | 0x40000000  # WS_POPUP -> WS_CHILD
+        user32.SetWindowLongW(hwnd, -16, ctypes.c_long(st - (1 << 32) if st >= 1 << 31 else st).value)
+        no_taskbar(hwnd)
+        if not user32.SetParent(hwnd, prog) and user32.GetAncestor(hwnd, GA_PARENT) != prog:
+            return False
+        user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0, FLAGS | 0x0020)  # top of the desktop's layers
+        desk["parent"] = prog
+        relayer()
+        place_top_right()
+        return True
+
+    def relayer():
+        """The Windows 11 desktop only paints 'layered' children, and the layer is
+        lost when the window moves into the desktop (or Tk sets 100% opacity)."""
+        if not desk["parent"]:
+            return
+        hwnd = frame_hwnd()
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex & ~0x80000)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | 0x80000)
+        alpha = max(26, min(255, int(round(float(settings["alpha"]) * 255))))
+        user32.SetLayeredWindowAttributes(wintypes.HWND(hwnd), 0, alpha, 2)
+        user32.RedrawWindow(wintypes.HWND(hwnd), None, None, 0x1 | 0x4 | 0x80 | 0x100)
+
+    def desk_origin():
+        if desk["parent"]:
+            r = wintypes.RECT()
+            user32.GetWindowRect(desk["parent"], ctypes.byref(r))
+            return r.left, r.top
+        return 0, 0
+
     def keep_on_desktop():
         hwnd = frame_hwnd()
+        if desk["parent"]:
+            return  # embedded: Windows keeps it on the desktop for us
+        no_taskbar(hwnd)
         fg = user32.GetForegroundWindow()
         if fg and pid_of(fg) == MY_PID:
             return  # user is using the calendar / notes / editor / menu
@@ -1133,13 +1069,21 @@ else:
     def keep_on_desktop():
         pass
 
+    def embed():
+        return False
+
+    def relayer():
+        pass
+
+    def desk_origin():
+        return 0, 0
+
 
 def fast_loop():
     try:
         keep_on_desktop()
         if root.state() != "normal":
             root.deiconify()
-        sync_catcher()
     except Exception:
         log_error(traceback.format_exc())
     root.after(300, fast_loop)
@@ -1152,6 +1096,8 @@ def slow_loop():
         if now != today:
             today = now
             render()
+        if IS_WIN and desk["parent"]:
+            embed()  # Explorer restarted -> join the new desktop
         place_top_right()
     except Exception:
         log_error(traceback.format_exc())
@@ -1160,6 +1106,26 @@ def slow_loop():
 
 set_autostart(True)
 apply_look()
+try:
+    embed()
+except Exception:
+    log_error(traceback.format_exc())
 fast_loop()
 slow_loop()
-root.mainloop()
+try:
+    root.mainloop()
+finally:
+    if not state["quitting"]:
+        # the window went away without Exit (e.g. Explorer restarted): start again
+        try:
+            save_notes_now()
+        except Exception:
+            pass
+        try:
+            import subprocess
+            import time
+            _lock.close()
+            time.sleep(3)
+            subprocess.Popen([sys.executable, os.path.abspath(__file__)])
+        except Exception:
+            log_error(traceback.format_exc())
